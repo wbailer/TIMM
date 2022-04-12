@@ -464,31 +464,28 @@ class EfficientNet(nn.Module):
       * EfficientNet-CondConv
       * MixNet S, M, L, XL
       * MnasNet A1, B1, and small
-      * MobileNet-V2
       * FBNet C
       * Single-Path NAS Pixel1
-      * TinyNet
+
     """
 
-    def __init__(
-            self, block_args, num_classes=1000, num_features=1280, in_chans=3, stem_size=32, fix_stem=False,
-            output_stride=32, pad_type='', round_chs_fn=round_channels, act_layer=None, norm_layer=None,
-            se_layer=None, drop_rate=0., drop_path_rate=0., global_pool='avg'):
+    def __init__(self, block_args, num_classes=1000, num_features=1280, in_chans=3, stem_size=32, fix_stem=False,
+                 output_stride=32, pad_type='', round_chs_fn=round_channels, act_layer=None, norm_layer=None,
+                 se_layer=None, drop_rate=0., drop_path_rate=0., global_pool='avg', num_classes_intermed=None, usemax=False):
         super(EfficientNet, self).__init__()
         act_layer = act_layer or nn.ReLU
         norm_layer = norm_layer or nn.BatchNorm2d
-        norm_act_layer = get_norm_act_layer(norm_layer, act_layer)
         se_layer = se_layer or SqueezeExcite
         self.num_classes = num_classes
         self.num_features = num_features
         self.drop_rate = drop_rate
-        self.grad_checkpointing = False
 
         # Stem
         if not fix_stem:
             stem_size = round_chs_fn(stem_size)
         self.conv_stem = create_conv2d(in_chans, stem_size, 3, stride=2, padding=pad_type)
         self.bn1 = norm_act_layer(stem_size, inplace=True)
+
 
         # Middle stages (IR/ER/DS Blocks)
         builder = EfficientNetBuilder(
@@ -502,7 +499,7 @@ class EfficientNet(nn.Module):
         self.conv_head = create_conv2d(head_chs, self.num_features, 1, padding=pad_type)
         self.bn2 = norm_act_layer(self.num_features, inplace=True)
         self.global_pool, self.classifier = create_classifier(
-            self.num_features, self.num_classes, pool_type=global_pool)
+            self.num_features, self.num_classes, pool_type=global_pool, num_classes_intermed=num_classes_intermed,usemax=usemax)
 
         efficientnet_init_weights(self)
 
@@ -552,11 +549,6 @@ class EfficientNet(nn.Module):
         if self.drop_rate > 0.:
             x = F.dropout(x, p=self.drop_rate, training=self.training)
         return x if pre_logits else self.classifier(x)
-
-    def forward(self, x):
-        x = self.forward_features(x)
-        x = self.forward_head(x)
-        return x
 
 
 class EfficientNetFeatures(nn.Module):
@@ -1416,6 +1408,23 @@ def efficientnet_b3(pretrained=False, **kwargs):
     # NOTE for train, drop_rate should be 0.3, drop_path_rate should be 0.2
     model = _gen_efficientnet(
         'efficientnet_b3', channel_multiplier=1.2, depth_multiplier=1.4, pretrained=pretrained, **kwargs)
+    return model
+
+@register_model
+def efficientnet_b3_places365supercat(pretrained=False, **kwargs):
+    """ EfficientNet-B3 with additional FC layer, mapping 365 places categories to supercategories """
+    # NOTE for train, drop_rate should be 0.3, drop_path_rate should be 0.2
+    model = _gen_efficientnet(
+        'efficientnet_b3', channel_multiplier=1.2, depth_multiplier=1.4, pretrained=pretrained, **dict(kwargs,num_classes_intermed=365))
+    return model
+    
+    
+@register_model
+def efficientnet_b3_places365supercatmax(pretrained=False, **kwargs):
+    """ EfficientNet-B3 with additional FC layer, mapping 365 places categories to supercategories (max. of fisrst classification only) """
+    # NOTE for train, drop_rate should be 0.3, drop_path_rate should be 0.2
+    model = _gen_efficientnet(
+        'efficientnet_b3', channel_multiplier=1.2, depth_multiplier=1.4, pretrained=pretrained, **dict(kwargs,num_classes_intermed=365,usemax=True))
     return model
 
 

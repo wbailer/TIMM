@@ -11,7 +11,6 @@ import argparse
 import os
 import csv
 import glob
-import json
 import time
 import logging
 import torch
@@ -22,7 +21,7 @@ from contextlib import suppress
 
 from timm.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
 from timm.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
-from timm.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_fuser
+from timm.utils import accuracy, prec_rec_per_class, AverageMeter, natural_key, setup_default_logging, set_jit_fuser
 
 has_apex = False
 try:
@@ -111,6 +110,10 @@ parser.add_argument('--real-labels', default='', type=str, metavar='FILENAME',
                     help='Real labels JSON file for imagenet evaluation')
 parser.add_argument('--valid-labels', default='', type=str, metavar='FILENAME',
                     help='Valid label indices txt file for validation of partial label space')
+parser.add_argument('--apr-per-class', action='store_true', default=False,
+                    help='Calculate accuracy, precision and recall per class')
+parser.add_argument('--acc-pm1', action='store_true', default=False,
+                    help='If set, count classes with ID + or minus one as correct')
 
 
 def validate(args):
@@ -176,10 +179,14 @@ def validate(args):
 
     criterion = nn.CrossEntropyLoss().cuda()
 
+
     dataset = create_dataset(
         root=args.data, name=args.dataset, split=args.split,
         download=args.dataset_download, load_bytes=args.tf_preprocessing, class_map=args.class_map)
-
+        
+        
+    
+         
     if args.valid_labels:
         with open(args.valid_labels, 'r') as f:
             valid_labels = {int(line.rstrip()) for line in f}
@@ -210,6 +217,21 @@ def validate(args):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
+    
+    if args.apr_per_class:
+        acc1c = []
+        prec1c = []
+        rec1c = []
+        acc5c = []
+        prec5c = []
+        rec5c = []
+        for i in range(args.num_classes):
+            acc1c.append(AverageMeter())
+            prec1c.append(AverageMeter())
+            rec1c.append(AverageMeter())
+            acc5c.append(AverageMeter())
+            prec5c.append(AverageMeter())
+            rec5c.append(AverageMeter())
 
     model.eval()
     with torch.no_grad():
@@ -219,7 +241,6 @@ def validate(args):
             input = input.contiguous(memory_format=torch.channels_last)
         with amp_autocast():
             model(input)
-
         end = time.time()
         for batch_idx, (input, target) in enumerate(loader):
             if args.no_prefetcher:
@@ -234,16 +255,33 @@ def validate(args):
 
             if valid_labels is not None:
                 output = output[:, valid_labels]
+      
+                
             loss = criterion(output, target)
-
+ 
             if real_labels is not None:
                 real_labels.add_result(output)
 
+
             # measure accuracy and record loss
-            acc1, acc5 = accuracy(output.detach(), target, topk=(1, 5))
+            acc1, acc5 = accuracy(output.detach(), target, topk=(1, 5), acc_pm1=args.acc_pm1)
             losses.update(loss.item(), input.size(0))
             top1.update(acc1.item(), input.size(0))
             top5.update(acc5.item(), input.size(0))
+
+           
+            
+            if args.apr_per_class:
+                apr_c = prec_rec_per_class(output.detach(), target, args.num_classes, topk=(1, 5))
+                for c in range(args.num_classes):
+                    acc1c[c].update(apr_c[1][c][0].item(), args.batch_size)
+                    acc5c[c].update(apr_c[5][c][0].item(), args.batch_size)
+                    if apr_c[1][c][3].item()>0:
+                        prec1c[c].update(apr_c[1][c][1].item(), apr_c[1][c][3].item())
+                        prec5c[c].update(apr_c[5][c][1].item(), apr_c[5][c][3].item())
+                    if apr_c[5][c][4].item()>0:
+                        rec1c[c].update(apr_c[1][c][2].item(), apr_c[1][c][4].item())
+                        rec5c[c].update(apr_c[5][c][2].item(), apr_c[5][c][4].item())
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -277,8 +315,13 @@ def validate(args):
     _logger.info(' * Acc@1 {:.3f} ({:.3f}) Acc@5 {:.3f} ({:.3f})'.format(
        results['top1'], results['top1_err'], results['top5'], results['top5_err']))
 
-    return results
+    if args.apr_per_class:
 
+        for c in dataset.parser.class_to_idx:
+            cid = int(dataset.parser.class_to_idx[c])
+            _logger.info(' {} ({:d}) * Acc@1 {:.3f} Prec@1 {:.3f} Rec@1 {:.3f} Acc@5 {:.3f} Prec@5 {:.3f} Rec@5 {:.3f}'.format(c,cid, acc1c[cid].avg, prec1c[cid].avg, rec1c[cid].avg, acc5c[cid].avg, prec5c[cid].avg, rec5c[cid].avg)) 
+ 
+    return results
 
 def _try_run(args, initial_batch_size):
     batch_size = initial_batch_size
@@ -299,7 +342,6 @@ def _try_run(args, initial_batch_size):
     results['error'] = error_str
     _logger.error(f'{args.model} failed to validate ({error_str}).')
     return results
-
 
 def main():
     setup_default_logging()

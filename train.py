@@ -123,7 +123,8 @@ parser.add_argument('--fuser', default='', type=str,
                     help="Select jit fuser. One of ('', 'te', 'old', 'nvfuser')")
 parser.add_argument('--grad-checkpointing', action='store_true', default=False,
                     help='Enable gradient checkpointing through model blocks/stages')
-
+parser.add_argument('--last-layer', action='store_true', default=False,
+                    help='Train only last layer')
 # Optimizer parameters
 parser.add_argument('--opt', default='sgd', type=str, metavar='OPTIMIZER',
                     help='Optimizer (default: "sgd"')
@@ -141,6 +142,7 @@ parser.add_argument('--clip-mode', type=str, default='norm',
                     help='Gradient clipping mode. One of ("norm", "value", "agc")')
 parser.add_argument('--layer-decay', type=float, default=None,
                     help='layer-wise learning rate decay (default: None)')
+
 
 # Learning rate schedule parameters
 parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
@@ -243,6 +245,7 @@ parser.add_argument('--drop-block', type=float, default=None, metavar='PCT',
                     help='Drop block rate (default: None)')
 
 # Batch norm parameters (only works with gen_efficientnet based models currently)
+
 parser.add_argument('--bn-momentum', type=float, default=None,
                     help='BatchNorm momentum override (if not None)')
 parser.add_argument('--bn-eps', type=float, default=None,
@@ -300,6 +303,7 @@ parser.add_argument('--tta', type=int, default=0, metavar='N',
 parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--use-multi-epochs-loader', action='store_true', default=False,
                     help='use the multi-epochs-loader to save time at the beginning of every epoch')
+
 parser.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
 
@@ -381,6 +385,7 @@ def main():
         drop_path_rate=args.drop_path,
         drop_block_rate=args.drop_block,
         global_pool=args.gp,
+
         bn_momentum=args.bn_momentum,
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
@@ -395,6 +400,16 @@ def main():
     if args.local_rank == 0:
         _logger.info(
             f'Model {safe_model_name(args.model)} created, param count:{sum([m.numel() for m in model.parameters()])}')
+
+    # fix all but last layer
+    if args.last_layer:
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        lastlayer = model.get_classifier()
+        if len(list(lastlayer.modules()))>0:
+            lastlayer = list(lastlayer.modules())[-1]
+        for parameter in lastlayer.parameters():
+            parameter.requires_grad = True
 
     data_config = resolve_data_config(vars(args), model=model, verbose=args.local_rank == 0)
 
@@ -450,7 +465,6 @@ def main():
     else:
         if args.local_rank == 0:
             _logger.info('AMP not enabled. Training in float32.')
-
 
     # optionally resume from a checkpoint
     resume_epoch = None
@@ -509,6 +523,9 @@ def main():
         class_map=args.class_map,
         download=args.dataset_download,
         batch_size=args.batch_size)
+
+     
+
 
     # setup mixup / cutmix
     collate_fn = None
